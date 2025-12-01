@@ -398,7 +398,7 @@ SPACK_ALIASES="concretise:concretize;containerise:containerize;rm:remove"
 _spack() {
     if $list_options
     then
-        SPACK_COMPREPLY="--color -v --verbose -k --insecure -b --bootstrap -V --version -h --help -H --all-help -c --config -C --config-scope -e --env -D --env-dir -E --no-env --use-env-repo -d --debug -t --backtrace --pdb --timestamp -m --mock --print-shell-vars --stacktrace -l --enable-locks -L --disable-locks -p --profile --sorted-profile --lines"
+        SPACK_COMPREPLY="--color -v --verbose -k --insecure -b --bootstrap -V --version -h --help -H --all-help -c --config -C --config-scope -e --env -D --env-dir -E --no-env --use-env-repo -d --debug -t --backtrace --pdb --timestamp -m --mock --print-shell-vars --stacktrace -l --enable-locks -L --disable-locks -p --profile --profile-file --sorted-profile --lines"
     else
         SPACK_COMPREPLY="add arch audit blame bootstrap build-env buildcache cd change checksum ci clean commands compiler compilers concretize concretise config containerize containerise create debug deconcretize dependencies dependents deprecate dev-build develop diff docs edit env extensions external fetch find gc gpg graph help info install license list load location log-parse logs maintainers make-installer mark mirror module patch pkg providers pydoc python reindex remove rm repo resource restage solve spec stage style tags test test-env tutorial undevelop uninstall unit-test unload url verify versions view"
     fi
@@ -1486,7 +1486,7 @@ _spack_mirror_add() {
 _spack_mirror_remove() {
     if $list_options
     then
-        SPACK_COMPREPLY="-h --help --scope"
+        SPACK_COMPREPLY="-h --help --scope --all-scopes"
     else
         _mirrors
     fi
@@ -1495,7 +1495,7 @@ _spack_mirror_remove() {
 _spack_mirror_rm() {
     if $list_options
     then
-        SPACK_COMPREPLY="-h --help --scope"
+        SPACK_COMPREPLY="-h --help --scope --all-scopes"
     else
         _mirrors
     fi
@@ -1839,7 +1839,7 @@ _spack_repo_set() {
 _spack_repo_remove() {
     if $list_options
     then
-        SPACK_COMPREPLY="-h --help --scope"
+        SPACK_COMPREPLY="-h --help --scope --all-scopes"
     else
         _repos
     fi
@@ -1848,7 +1848,7 @@ _spack_repo_remove() {
 _spack_repo_rm() {
     if $list_options
     then
-        SPACK_COMPREPLY="-h --help --scope"
+        SPACK_COMPREPLY="-h --help --scope --all-scopes"
     else
         _repos
     fi

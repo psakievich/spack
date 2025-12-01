@@ -88,6 +88,7 @@ import spack.llnl.util.filesystem as fs
 import spack.llnl.util.lang as lang
 import spack.llnl.util.tty as tty
 import spack.llnl.util.tty.color as clr
+import spack.patch
 import spack.paths
 import spack.platforms
 import spack.provider_index
@@ -4063,6 +4064,46 @@ class Spec:
 
         return STORE.layout.root
 
+    def _format_default(self) -> str:
+        """Fast path for formatting with DEFAULT_FORMAT and no color.
+
+        This method manually concatenates the string representation of spec attributes,
+        avoiding the regex parsing overhead of the general format() method.
+        """
+        parts = []
+
+        if self.name:
+            parts.append(self.name)
+
+        if self.versions:
+            version_str = str(self.versions)
+            if version_str and version_str != ":":  # only include if not full range
+                parts.append(f"@{version_str}")
+
+        compiler_flags_str = str(self.compiler_flags)
+        if compiler_flags_str:
+            parts.append(compiler_flags_str)
+
+        variants_str = str(self.variants)
+        if variants_str:
+            parts.append(variants_str)
+
+        if not self.name and self.namespace:
+            parts.append(f" namespace={self.namespace}")
+
+        if self.architecture:
+            if self.architecture.platform:
+                parts.append(f" platform={self.architecture.platform}")
+            if self.architecture.os:
+                parts.append(f" os={self.architecture.os}")
+            if self.architecture.target:
+                parts.append(f" target={self.architecture.target}")
+
+        if self.abstract_hash:
+            parts.append(f"/{self.abstract_hash}")
+
+        return "".join(parts).strip()
+
     def format(self, format_string: str = DEFAULT_FORMAT, color: Optional[bool] = False) -> str:
         r"""Prints out attributes of a spec according to a format string.
 
@@ -4146,6 +4187,10 @@ class Spec:
             color: True for colorized result; False for no color; None for auto color.
 
         """
+        # Fast path for the common case: default format with no color
+        if format_string == DEFAULT_FORMAT and color is False:
+            return self._format_default()
+
         ensure_modern_format_string(format_string)
 
         def safe_color(sigil: str, string: str, color_fmt: Optional[str]) -> str:
@@ -5572,6 +5617,79 @@ def eval_conditional(string):
     valid_variables = get_host_environment()
     valid_variables.update({"re": re, "env": os.environ})
     return eval(string, valid_variables)
+
+
+def _inject_patches_variant(root: Spec) -> None:
+    # This dictionary will store object IDs rather than Specs as keys
+    # since the Spec __hash__ will change as patches are added to them
+    spec_to_patches: Dict[int, Set[spack.patch.Patch]] = {}
+    for s in root.traverse():
+        # After concretizing, assign namespaces to anything left.
+        # Note that this doesn't count as a "change".  The repository
+        # configuration is constant throughout a spack run, and
+        # normalize and concretize evaluate Packages using Repo.get(),
+        # which respects precedence.  So, a namespace assignment isn't
+        # changing how a package name would have been interpreted and
+        # we can do it as late as possible to allow as much
+        # compatibility across repositories as possible.
+        if s.namespace is None:
+            s.namespace = spack.repo.PATH.repo_for_pkg(s.name).namespace
+
+        if s.concrete:
+            continue
+
+        # Add any patches from the package to the spec.
+        node_patches = {
+            patch
+            for cond, patch_list in spack.repo.PATH.get_pkg_class(s.fullname).patches.items()
+            if s.satisfies(cond)
+            for patch in patch_list
+        }
+        if node_patches:
+            spec_to_patches[id(s)] = node_patches
+
+    # Also record all patches required on dependencies by depends_on(..., patch=...)
+    for dspec in root.traverse_edges(deptype=dt.ALL, cover="edges", root=False):
+        if dspec.spec.concrete:
+            continue
+
+        pkg_deps = spack.repo.PATH.get_pkg_class(dspec.parent.fullname).dependencies
+
+        edge_patches: List[spack.patch.Patch] = []
+        for cond, deps_by_name in pkg_deps.items():
+            dependency = deps_by_name.get(dspec.spec.name)
+            if not dependency:
+                continue
+
+            if not dspec.parent.satisfies(cond):
+                continue
+
+            for pcond, patch_list in dependency.patches.items():
+                if dspec.spec.satisfies(pcond):
+                    edge_patches.extend(patch_list)
+
+        if edge_patches:
+            spec_to_patches.setdefault(id(dspec.spec), set()).update(edge_patches)
+
+    for spec in root.traverse():
+        if id(spec) not in spec_to_patches:
+            continue
+
+        patches = list(spec_to_patches[id(spec)])
+        variant: vt.VariantValue = spec.variants.setdefault(
+            "patches", vt.MultiValuedVariant("patches", ())
+        )
+        variant.set(*(p.sha256 for p in patches))
+        # FIXME: Monkey patches variant to store patches order
+        ordered_hashes = [(*p.ordering_key, p.sha256) for p in patches if p.ordering_key]
+        ordered_hashes.sort()
+        tty.debug(
+            f"Ordered hashes [{spec.name}]: "
+            + ", ".join("/".join(str(e) for e in t) for t in ordered_hashes)
+        )
+        setattr(
+            variant, "_patches_in_order_of_appearance", [sha256 for _, _, sha256 in ordered_hashes]
+        )
 
 
 class InvalidVariantForSpecError(spack.error.SpecError):

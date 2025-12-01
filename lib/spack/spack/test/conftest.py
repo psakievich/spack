@@ -1209,32 +1209,11 @@ def install_mockery(temporary_store: spack.store.Store, mutable_config, mock_pac
     temporary_store.failure_tracker.clear_all()
 
 
-@pytest.fixture(scope="module")
-def temporary_mirror_dir(tmp_path_factory: pytest.TempPathFactory):
-    dir = tmp_path_factory.mktemp("mirror")
-    yield str(dir)
-
-
 @pytest.fixture(scope="function")
-def temporary_mirror(temporary_mirror_dir):
-    mirror_url = url_util.path_to_file_url(temporary_mirror_dir)
-    mirror_cmd("add", "--scope", "site", "test-mirror-func", mirror_url)
-    yield temporary_mirror_dir
-    mirror_cmd("rm", "--scope=site", "test-mirror-func")
-
-
-@pytest.fixture(scope="function")
-def mutable_temporary_mirror_dir(tmp_path_factory: pytest.TempPathFactory):
-    dir = tmp_path_factory.mktemp("mirror")
-    yield str(dir)
-
-
-@pytest.fixture(scope="function")
-def mutable_temporary_mirror(mutable_temporary_mirror_dir):
-    mirror_url = url_util.path_to_file_url(mutable_temporary_mirror_dir)
-    mirror_cmd("add", "--scope", "site", "test-mirror-func", mirror_url)
-    yield mutable_temporary_mirror_dir
-    mirror_cmd("rm", "--scope=site", "test-mirror-func")
+def temporary_mirror(mutable_config, tmp_path_factory):
+    mirror_dir = tmp_path_factory.mktemp("mirror")
+    mirror_cmd("add", "test-mirror-func", mirror_dir.as_uri())
+    yield str(mirror_dir)
 
 
 @pytest.fixture(scope="function")
@@ -1254,6 +1233,21 @@ def mock_fetch(mock_archive, monkeypatch):
     monkeypatch.setattr(
         spack.package_base.PackageBase, "fetcher", URLFetchStrategy(url=mock_archive.url)
     )
+
+
+class MockResourceFetcherGenerator:
+    def __init__(self, url):
+        self.url = url
+
+    def _generate_fetchers(self, *args, **kwargs):
+        return [URLFetchStrategy(url=self.url)]
+
+
+@pytest.fixture()
+def mock_resource_fetch(mock_archive, monkeypatch):
+    """Fake fetcher generator that works with resource stages to redirect to a file."""
+    mfg = MockResourceFetcherGenerator(mock_archive.url)
+    monkeypatch.setattr(spack.stage.ResourceStage, "_generate_fetchers", mfg._generate_fetchers)
 
 
 class MockLayout:

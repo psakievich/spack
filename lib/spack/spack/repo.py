@@ -673,7 +673,7 @@ class RepoPath:
         """Create a RepoPath from a configuration object."""
         overrides = {
             pkg_name: data["package_attributes"]
-            for pkg_name, data in config.get("packages").items()
+            for pkg_name, data in config.get_config("packages").items()
             if pkg_name != "all" and "package_attributes" in data
         }
 
@@ -805,15 +805,15 @@ class RepoPath:
                 self._patch_index.update(repo.patch_index)
         return self._patch_index
 
-    @autospec
-    def providers_for(self, virtual_spec: "spack.spec.Spec") -> List["spack.spec.Spec"]:
+    def providers_for(self, virtual: Union[str, "spack.spec.Spec"]) -> List["spack.spec.Spec"]:
+        all_packages = self._all_package_names_set(include_virtuals=False)
         providers = [
             spec
-            for spec in self.provider_index.providers_for(virtual_spec)
-            if spec.name in self._all_package_names_set(include_virtuals=False)
+            for spec in self.provider_index.providers_for(virtual)
+            if spec.name in all_packages
         ]
         if not providers:
-            raise UnknownPackageError(virtual_spec.fullname)
+            raise UnknownPackageError(virtual if isinstance(virtual, str) else virtual.fullname)
         return providers
 
     @autospec
@@ -1278,11 +1278,10 @@ class Repo:
         """Index of patches and packages they're defined on."""
         return self.index["patches"]
 
-    @autospec
-    def providers_for(self, vpkg_spec: "spack.spec.Spec") -> List["spack.spec.Spec"]:
-        providers = self.provider_index.providers_for(vpkg_spec)
+    def providers_for(self, virtual: Union[str, "spack.spec.Spec"]) -> List["spack.spec.Spec"]:
+        providers = self.provider_index.providers_for(virtual)
         if not providers:
-            raise UnknownPackageError(vpkg_spec.fullname)
+            raise UnknownPackageError(virtual if isinstance(virtual, str) else virtual.fullname)
         return providers
 
     @autospec
@@ -1709,14 +1708,26 @@ class RemoteRepoDescriptor(RepoDescriptor):
                         # determine the default branch from ls-remote
                         # (if no branch, tag, or commit is specified)
                         if not (self.commit or self.tag or self.branch):
-                            refs = git("ls-remote", "--symref", remote, "HEAD", output=str)
-                            ref_match = re.search(r"refs/heads/(\S+)", refs)
-                            if not ref_match:
+                            # Get HEAD and all branches. On more recent versions of git, this can
+                            # be done with a single call to `git ls-remote --symref remote HEAD`.
+                            refs = git("ls-remote", remote, "HEAD", "refs/heads/*", output=str)
+                            head_match = re.search(r"^([0-9a-f]+)\s+HEAD$", refs, re.MULTILINE)
+                            if not head_match:
+                                self.error = f"Unable to locate HEAD for {self.repository}"
+                                return
+
+                            head_sha = head_match.group(1)
+
+                            # Find the first branch that matches this SHA
+                            branch_match = re.search(
+                                rf"^{re.escape(head_sha)}\s+refs/heads/(\S+)$", refs, re.MULTILINE
+                            )
+                            if not branch_match:
                                 self.error = (
                                     f"Unable to locate a default branch for {self.repository}"
                                 )
                                 return
-                            self.branch = ref_match.group(1)
+                            self.branch = branch_match.group(1)
 
                     # determine the branch and remote if no config values exist
                     elif not (self.commit or self.tag or self.branch):
@@ -1875,7 +1886,7 @@ class RepoDescriptors(Mapping[str, RepoDescriptor]):
         return RepoDescriptors(
             {
                 name: parse_config_descriptor(name, cfg, lock)
-                for name, cfg in config.get("repos", scope=scope).items()
+                for name, cfg in config.get_config("repos", scope=scope).items()
             }
         )
 

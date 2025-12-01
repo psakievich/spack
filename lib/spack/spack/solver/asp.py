@@ -15,7 +15,6 @@ import random
 import re
 import sys
 import time
-import typing
 import warnings
 from contextlib import contextmanager
 from typing import (
@@ -50,7 +49,6 @@ import spack.llnl.util.lang
 import spack.llnl.util.tty as tty
 import spack.package_base
 import spack.package_prefs
-import spack.patch
 import spack.platforms
 import spack.repo
 import spack.solver.splicing
@@ -89,15 +87,13 @@ from .input_analysis import create_counter, create_graph_analyzer
 from .requirements import RequirementKind, RequirementOrigin, RequirementParser, RequirementRule
 from .reuse import ReusableSpecsSelector
 from .runtimes import RuntimePropertyRecorder, all_libcs, external_config_with_implicit_externals
-from .versions import DeclaredVersion, Provenance, concretization_version_order
+from .versions import Provenance
 
 GitOrStandardVersion = Union[spack.version.GitVersion, spack.version.StandardVersion]
 
 TransformFunction = Callable[[spack.spec.Spec, List[AspFunction]], List[AspFunction]]
 
-#: strip comments and whitespace from ASP code
-_STRIP_COMMENTS_RE = re.compile(r"\%[^\n]*\n")
-_STRIP_NEWLINES_RE = re.compile(r"\s*\n\s*")
+EMPTY_SPEC = spack.spec.Spec()
 
 
 class OutputConfiguration(NamedTuple):
@@ -124,7 +120,7 @@ def default_clingo_control():
     control = clingo().Control()
     control.configuration.configuration = "tweety"
     control.configuration.solver.heuristic = "Domain"
-    control.configuration.solver.opt_strategy = "usc,one,1"
+    control.configuration.solver.opt_strategy = "usc"
     return control
 
 
@@ -1449,6 +1445,7 @@ class SpackSolverSetup:
     """Class to set up and run a Spack concretization solve."""
 
     gen: "ProblemInstanceBuilder"
+    possible_versions: Dict[str, Dict[GitOrStandardVersion, List[Provenance]]]
 
     def __init__(self, tests: spack.concretize.TestsType = False):
         self.possible_graph = create_graph_analyzer()
@@ -1458,8 +1455,9 @@ class SpackSolverSetup:
         self.possible_virtuals: Set[str] = set()
 
         self.assumptions: List[Tuple["clingo.Symbol", bool]] = []  # type: ignore[name-defined]
-        self.declared_versions: Dict[str, List[DeclaredVersion]] = collections.defaultdict(list)
-        self.possible_versions: Dict[str, Set[GitOrStandardVersion]] = collections.defaultdict(set)
+        # pkg_name -> version -> list of possible origins (package.py, installed, etc.)
+        self.possible_versions = collections.defaultdict(lambda: collections.defaultdict(list))
+        self.versions_from_yaml: Dict[str, List[GitOrStandardVersion]] = {}
         self.git_commit_versions: Dict[str, Dict[GitOrStandardVersion, str]] = (
             collections.defaultdict(dict)
         )
@@ -1503,38 +1501,24 @@ class SpackSolverSetup:
         # If true, we have to load the code for synthesizing splices
         self.enable_splicing: bool = spack.config.CONFIG.get("concretizer:splice:automatic")
 
-    def pkg_version_rules(self, pkg):
-        """Output declared versions of a package.
-
-        This uses self.declared_versions so that we include any versions
-        that arise from a spec.
-        """
-
-        def key_fn(version):
-            # Origins are sorted by "provenance" first, see the Provenance enumeration above
-            return version.origin, version.idx
-
-        if isinstance(pkg, str):
-            pkg = self.pkg_class(pkg)
-
-        declared_versions = self.declared_versions[pkg.name]
-        partially_sorted_versions = sorted(set(declared_versions), key=key_fn)
-
-        most_to_least_preferred = []
-        for _, group in itertools.groupby(partially_sorted_versions, key=key_fn):
-            most_to_least_preferred.extend(
-                list(sorted(group, reverse=True, key=lambda x: vn.ver(x.version)))
+    def pkg_version_rules(self, pkg: Type[spack.package_base.PackageBase]) -> None:
+        """Declares known versions, their origins, and their weights."""
+        version_provenance = self.possible_versions[pkg.name]
+        ordered_versions = spack.package_base.sort_by_pkg_preference(
+            self.possible_versions[pkg.name], pkg=pkg
+        )
+        # Account for preferences in packages.yaml, if any
+        if pkg.name in self.versions_from_yaml:
+            ordered_versions = spack.llnl.util.lang.dedupe(
+                self.versions_from_yaml[pkg.name] + ordered_versions
             )
 
-        for weight, declared_version in enumerate(most_to_least_preferred):
-            self.gen.fact(
-                fn.pkg_fact(
-                    pkg.name,
-                    fn.version_declared(
-                        declared_version.version, weight, str(declared_version.origin)
-                    ),
+        for weight, declared_version in enumerate(ordered_versions):
+            self.gen.fact(fn.pkg_fact(pkg.name, fn.version_declared(declared_version, weight)))
+            for origin in version_provenance[declared_version]:
+                self.gen.fact(
+                    fn.pkg_fact(pkg.name, fn.version_origin(declared_version, str(origin)))
                 )
-            )
 
         for v in self.possible_versions[pkg.name]:
             if pkg.needs_commit(v):
@@ -1574,22 +1558,24 @@ class SpackSolverSetup:
 
     def conflict_rules(self, pkg):
         for when_spec, conflict_specs in pkg.conflicts.items():
-            when_spec_msg = f"conflict constraint {str(when_spec)}"
+            when_spec_msg = f"conflict constraint {when_spec}"
             when_spec_id = self.condition(when_spec, required_name=pkg.name, msg=when_spec_msg)
+            when_spec_str = str(when_spec)
 
             for conflict_spec, conflict_msg in conflict_specs:
-                conflict_spec = spack.spec.Spec(conflict_spec)
+                conflict_spec_str = str(conflict_spec)
                 if conflict_msg is None:
                     conflict_msg = f"{pkg.name}: "
-                    if when_spec == spack.spec.Spec():
-                        conflict_msg += f"conflicts with '{conflict_spec}'"
+                    if not when_spec_str:
+                        conflict_msg += f"conflicts with '{conflict_spec_str}'"
                     else:
-                        conflict_msg += f"'{conflict_spec}' conflicts with '{when_spec}'"
+                        conflict_msg += f"'{conflict_spec_str}' conflicts with '{when_spec_str}'"
 
-                spec_for_msg = conflict_spec
-                if conflict_spec == spack.spec.Spec():
-                    spec_for_msg = spack.spec.Spec(pkg.name)
-                conflict_spec_msg = f"conflict is triggered when {str(spec_for_msg)}"
+                if not conflict_spec_str:
+                    conflict_spec_msg = f"conflict is triggered when {pkg.name}"
+                else:
+                    conflict_spec_msg = f"conflict is triggered when {conflict_spec_str}"
+
                 conflict_spec_id = self.condition(
                     conflict_spec,
                     required_name=conflict_spec.name or pkg.name,
@@ -1694,7 +1680,7 @@ class SpackSolverSetup:
         # used to find a variant id from its variant definition (for variant values on specs)
         self.variant_ids_by_def_id[id(variant_def)] = vid
 
-        if when == spack.spec.Spec():
+        if when == EMPTY_SPEC:
             # unconditional variant
             pkg_fact(fn.variant_definition(name, vid))
         else:
@@ -1769,9 +1755,7 @@ class SpackSolverSetup:
                     msg=f"invalid variant value: {vstring}",
                 )
                 constraint_id = self.condition(
-                    spack.spec.Spec(),
-                    required_name=pkg.name,
-                    msg="empty (total) conflict constraint",
+                    EMPTY_SPEC, required_name=pkg.name, msg="empty (total) conflict constraint"
                 )
                 msg = f"variant value {vstring} is conditionally disabled"
                 pkg_fact(fn.conflict(trigger_id, constraint_id, msg))
@@ -1955,8 +1939,24 @@ class SpackSolverSetup:
 
     def package_dependencies_rules(self, pkg):
         """Translate ``depends_on`` directives into ASP logic."""
-        for cond, deps_by_name in sorted(pkg.dependencies.items()):
-            for _, dep in sorted(deps_by_name.items()):
+
+        def track_dependencies(input_spec, requirements):
+            return requirements + [fn.attr("track_dependencies", input_spec.name)]
+
+        def dependency_holds(input_spec, requirements):
+            result = remove_facts("node", "virtual_node")(input_spec, requirements) + [
+                fn.attr("dependency_holds", pkg.name, input_spec.name, dt.flag_to_string(t))
+                for t in dt.ALL_FLAGS
+                if t & depflag
+            ]
+            if input_spec.name not in pkg.extendees:
+                return result
+            return result + [fn.attr("extends", pkg.name, input_spec.name)]
+
+        for cond, deps_by_name in pkg.dependencies.items():
+            cond_str = str(cond)
+            cond_str_suffix = f" when {cond_str}" if cond_str else ""
+            for _, dep in deps_by_name.items():
                 depflag = dep.depflag
                 # Skip test dependencies if they're not requested
                 if not self.tests:
@@ -1971,26 +1971,7 @@ class SpackSolverSetup:
                 if not depflag:
                     continue
 
-                msg = f"{pkg.name} depends on {dep.spec}"
-                if cond != spack.spec.Spec():
-                    msg += f" when {cond}"
-                else:
-                    pass
-
-                def track_dependencies(input_spec, requirements):
-                    return requirements + [fn.attr("track_dependencies", input_spec.name)]
-
-                def dependency_holds(input_spec, requirements):
-                    result = remove_facts("node", "virtual_node")(input_spec, requirements) + [
-                        fn.attr(
-                            "dependency_holds", pkg.name, input_spec.name, dt.flag_to_string(t)
-                        )
-                        for t in dt.ALL_FLAGS
-                        if t & depflag
-                    ]
-                    if input_spec.name not in pkg.extendees:
-                        return result
-                    return result + [fn.attr("extends", pkg.name, input_spec.name)]
+                msg = f"{pkg.name} depends on {dep.spec}{cond_str_suffix}"
 
                 context = ConditionContext()
                 context.source = ConstraintOrigin.append_type_suffix(
@@ -2107,7 +2088,7 @@ class SpackSolverSetup:
             required, preferred, removed = [], [], set()
             for rule in rules:
                 # We don't deal with conditional requirements
-                if rule.condition != spack.spec.Spec():
+                if rule.condition != EMPTY_SPEC:
                     continue
 
                 if rule.origin == RequirementOrigin.PREFER_YAML:
@@ -2146,7 +2127,7 @@ class SpackSolverSetup:
             # Propagated preferences have a higher penalty that normal preferences
             weight_multiplier = 2 if rule.origin == RequirementOrigin.INPUT_SPECS else 1
             # Write explicitly if a requirement is conditional or not
-            if rule.condition != spack.spec.Spec():
+            if rule.condition != EMPTY_SPEC:
                 msg = f"activate requirement {requirement_grp_id} if {rule.condition} holds"
                 context = ConditionContext()
                 context.transform_required = dag_closure_by_deptype
@@ -2197,7 +2178,7 @@ class SpackSolverSetup:
                     # "virtual_node" in imposed specs
 
                     info_msg = f"{input_spec} is a requirement for package {pkg_name}"
-                    if rule.condition != spack.spec.Spec():
+                    if rule.condition != EMPTY_SPEC:
                         info_msg += f" when {rule.condition}"
                     if rule.message:
                         info_msg += f" ({rule.message})"
@@ -2479,7 +2460,7 @@ class SpackSolverSetup:
         edge_clauses = []
         for dspec in spec.edges_to_dependencies():
             # Ignore conditional dependencies, they are handled by caller
-            if dspec.when != spack.spec.Spec():
+            if dspec.when != EMPTY_SPEC:
                 continue
 
             dep = dspec.spec
@@ -2584,61 +2565,53 @@ class SpackSolverSetup:
         self, possible_pkgs: Set[str], *, require_checksum: bool, allow_deprecated: bool
     ):
         """Declare any versions in specs not declared in packages."""
-        packages_yaml = spack.config.get("packages")
+        packages_yaml = spack.config.CONFIG.get_config("packages")
         for pkg_name in sorted(possible_pkgs):
             pkg_cls = self.pkg_class(pkg_name)
 
             # All the versions from the corresponding package.py file. Since concepts
             # like being a "develop" version or being preferred exist only at a
             # package.py level, sort them in this partial list here
-            package_py_versions = sorted(
-                pkg_cls.versions.items(), key=concretization_version_order, reverse=True
-            )
+            from_package_py = list(pkg_cls.versions.items())
 
             if require_checksum and pkg_cls.has_code:
-                package_py_versions = [
-                    x for x in package_py_versions if _is_checksummed_version(x)
-                ]
+                from_package_py = [x for x in from_package_py if _is_checksummed_version(x)]
 
-            for idx, (v, version_info) in enumerate(package_py_versions):
+            for v, version_info in from_package_py:
                 if version_info.get("deprecated", False):
                     self.deprecated_versions[pkg_name].add(v)
                     if not allow_deprecated:
                         continue
 
-                self.possible_versions[pkg_name].add(v)
-                self.declared_versions[pkg_name].append(
-                    DeclaredVersion(version=v, idx=idx, origin=Provenance.PACKAGE_PY)
-                )
+                self.possible_versions[pkg_name][v].append(Provenance.PACKAGE_PY)
 
             if pkg_name not in packages_yaml or "version" not in packages_yaml[pkg_name]:
                 continue
 
             # TODO(psakiev) Need facts about versions
             # - requires_commit (associated with tag or branch)
-            version_defs: List[GitOrStandardVersion] = []
+            from_packages_yaml: List[GitOrStandardVersion] = []
 
             for vstr in packages_yaml[pkg_name]["version"]:
                 v = vn.ver(vstr)
 
                 if isinstance(v, vn.GitVersion):
                     if not require_checksum or v.is_commit:
-                        version_defs.append(v)
+                        from_packages_yaml.append(v)
                 else:
                     matches = [x for x in self.possible_versions[pkg_name] if x.satisfies(v)]
                     matches.sort(reverse=True)
                     if not matches:
                         raise spack.error.ConfigError(
                             f"Preference for version {v} does not match any known "
-                            f"version of {pkg_name} (in its package.py or any external)"
+                            f"version of {pkg_name}"
                         )
-                    version_defs.extend(matches)
+                    from_packages_yaml.extend(matches)
 
-            for weight, vdef in enumerate(spack.llnl.util.lang.dedupe(version_defs)):
-                self.declared_versions[pkg_name].append(
-                    DeclaredVersion(version=vdef, idx=weight, origin=Provenance.PACKAGES_YAML)
-                )
-                self.possible_versions[pkg_name].add(vdef)
+            from_packages_yaml = list(spack.llnl.util.lang.dedupe(from_packages_yaml))
+            for v in from_packages_yaml:
+                self.possible_versions[pkg_name][v].append(Provenance.PACKAGES_YAML)
+            self.versions_from_yaml[pkg_name] = from_packages_yaml
 
     def define_ad_hoc_versions_from_specs(
         self, specs, origin, *, allow_deprecated: bool, require_checksum: bool
@@ -2646,8 +2619,7 @@ class SpackSolverSetup:
         """Add concrete versions to possible versions from lists of CLI/dev specs."""
         for s in traverse.traverse_nodes(specs):
             # If there is a concrete version on the CLI *that we know nothing
-            # about*, add it to the known versions. Use idx=0, which is the
-            # best possible, so they're guaranteed to be used preferentially.
+            # about*, add it to the known versions.
             version = s.versions.concrete
 
             if version is None or (any((v == version) for v in self.possible_versions[s.name])):
@@ -2661,9 +2633,7 @@ class SpackSolverSetup:
             if not allow_deprecated and version in self.deprecated_versions[s.name]:
                 continue
 
-            declared = DeclaredVersion(version=version, idx=0, origin=origin)
-            self.declared_versions[s.name].append(declared)
-            self.possible_versions[s.name].add(version)
+            self.possible_versions[s.name][version].append(origin)
 
     def _supported_targets(self, compiler_name, compiler_version, targets):
         """Get a list of which targets are supported by the compiler.
@@ -2780,7 +2750,7 @@ class SpackSolverSetup:
 
             self.gen.newline()
 
-        i = 0  # TODO compute per-target offset?
+        i = 0
         for target in candidate_targets:
             self.gen.fact(fn.target(target.name))
             self.gen.fact(fn.target_family(target.name, target.family.name))
@@ -2806,8 +2776,8 @@ class SpackSolverSetup:
     def define_version_constraints(self):
         """Define what version_satisfies(...) means in ASP logic."""
 
-        for pkg_name, versions in sorted(self.possible_versions.items()):
-            for v in sorted(versions):
+        for pkg_name, versions in self.possible_versions.items():
+            for v in versions:
                 if v in self.git_commit_versions[pkg_name]:
                     sha = self.git_commit_versions[pkg_name].get(v)
                     if sha:
@@ -2816,11 +2786,12 @@ class SpackSolverSetup:
                         self.gen.fact(fn.pkg_fact(pkg_name, fn.version_needs_commit(v)))
         self.gen.newline()
 
-        for pkg_name, versions in sorted(self.version_constraints):
+        for pkg_name, versions in self.version_constraints:
             # generate facts for each package constraint and the version
             # that satisfies it
-            for v in sorted(v for v in self.possible_versions[pkg_name] if v.satisfies(versions)):
-                self.gen.fact(fn.pkg_fact(pkg_name, fn.version_satisfies(versions, v)))
+            for v in self.possible_versions[pkg_name]:
+                if v.satisfies(versions):
+                    self.gen.fact(fn.pkg_fact(pkg_name, fn.version_satisfies(versions, v)))
             self.gen.newline()
 
     def collect_virtual_constraints(self):
@@ -2852,7 +2823,7 @@ class SpackSolverSetup:
         for pkg_name, versions in sorted(constraint_map.items()):
             possible_versions = set(sum([versions_for(v) for v in versions], []))
             for version in sorted(possible_versions):
-                self.possible_versions[pkg_name].add(version)
+                self.possible_versions[pkg_name][version].append(Provenance.VIRTUAL_CONSTRAINT)
 
     def define_compiler_version_constraints(self):
         for constraint in sorted(self.compiler_version_constraints):
@@ -2949,19 +2920,12 @@ class SpackSolverSetup:
             # - Add versions to possible versions
             # - Add OS to possible OS's
 
-            # is traverse deterministic?
             for dep in spec.traverse():
-                self.possible_versions[dep.name].add(dep.version)
+                provenance = Provenance.INSTALLED
                 if isinstance(dep.version, vn.GitVersion):
-                    self.declared_versions[dep.name].append(
-                        DeclaredVersion(
-                            version=dep.version, idx=0, origin=Provenance.INSTALLED_GIT_VERSION
-                        )
-                    )
-                else:
-                    self.declared_versions[dep.name].append(
-                        DeclaredVersion(version=dep.version, idx=0, origin=Provenance.INSTALLED)
-                    )
+                    provenance = Provenance.INSTALLED_GIT_VERSION
+
+                self.possible_versions[dep.name][dep.version].append(provenance)
                 self.possible_oses.add(dep.os)
 
     def define_concrete_input_specs(self, specs, possible):
@@ -3200,15 +3164,16 @@ class SpackSolverSetup:
                 # Inject default flags for compilers
                 recorder("*").default_flags(compiler)
 
-            # FIXME (compiler as nodes): think of using isinstance(compiler_cls, WrappedCompiler)
             # Add a dependency on the compiler wrapper
+            compiler_str = f"{compiler.name} /{compiler.dag_hash()}"
             for language in ("c", "cxx", "fortran"):
-                compiler_str = f"{compiler.name}@{compiler.versions}"
+                # Using compiler.name causes a bit of duplication, but that is taken care of by
+                # clingo during grounding.
                 recorder("*").depends_on(
                     "compiler-wrapper",
-                    when=f"%[deptypes=build virtuals={language}] {compiler_str}",
+                    when=f"%[deptypes=build virtuals={language}] {compiler.name}",
                     type="build",
-                    description=f"Add the compiler wrapper when using {compiler} for {language}",
+                    description=f"Add compiler wrapper when using {compiler.name} for {language}",
                 )
 
             if not using_libc_compatibility():
@@ -3226,9 +3191,9 @@ class SpackSolverSetup:
             if current_libc:
                 recorder("*").depends_on(
                     "libc",
-                    when=f"%[deptypes=build] {compiler_str}",
+                    when=f"%[deptypes=build] {compiler.name}",
                     type="link",
-                    description=f"Add libc when using {compiler}",
+                    description=f"Add libc when using {compiler.name}",
                 )
                 recorder("*").depends_on(
                     f"{current_libc.name}@={current_libc.version}",
@@ -3302,7 +3267,7 @@ class SpackSolverSetup:
         """
         for dspec in spec.traverse_edges():
             # Ignore unconditional deps
-            if dspec.when == spack.spec.Spec():
+            if dspec.when == EMPTY_SPEC:
                 continue
 
             # Cannot use "virtual_node" attr as key for condition
@@ -3344,7 +3309,7 @@ class SpackSolverSetup:
         versions. If they are abstract and statically have no match, then we
         need to throw an error. This function assumes all possible versions are already
         registered in self.possible_versions."""
-        for pkg_name, d in spack.config.get("packages").items():
+        for pkg_name, d in spack.config.CONFIG.get_config("packages").items():
             if pkg_name == "all" or "require" not in d:
                 continue
 
@@ -3377,10 +3342,7 @@ class SpackSolverSetup:
                 # If concrete an not yet defined, conditionally define it, like we do for specs
                 # from the command line.
                 if not require_checksum or _is_checksummed_git_version(v):
-                    self.declared_versions[name].append(
-                        DeclaredVersion(version=v, idx=0, origin=Provenance.PACKAGE_REQUIREMENT)
-                    )
-                    self.possible_versions[name].add(v)
+                    self.possible_versions[name][v].append(Provenance.PACKAGE_REQUIREMENT)
 
     def _specs_from_requires(self, pkg_name, section):
         """Collect specs from a requirement rule"""
@@ -3404,7 +3366,7 @@ class SpackSolverSetup:
             for s in spec_group[key]:
                 yield _spec_with_default_name(s, pkg_name)
 
-    def pkg_class(self, pkg_name: str) -> typing.Type[spack.package_base.PackageBase]:
+    def pkg_class(self, pkg_name: str) -> Type[spack.package_base.PackageBase]:
         request = pkg_name
         if pkg_name in self.explicitly_required_namespaces:
             namespace = self.explicitly_required_namespaces[pkg_name]
@@ -3821,15 +3783,11 @@ class SpecBuilder:
                 if spack.repo.PATH.is_virtual(pkg):
                     continue
 
-                # if we've already gotten a concrete spec for this pkg,
-                # do not bother calling actions on it except for node_flag_source,
-                # since node_flag_source is tracking information not in the spec itself
-                # we also need to keep track of splicing information.
+                # if we've already gotten a concrete spec for this pkg, we're done, unless
+                # we're splicing. `splice_at_hash()` is the only action we call on concrete specs.
                 spec = self._specs.get(node)
-                if spec and spec.concrete:
-                    do_not_ignore_attrs = ["node_flag_source", "splice_at_hash"]
-                    if name not in do_not_ignore_attrs:
-                        continue
+                if spec and spec.concrete and name != "splice_at_hash":
+                    continue
 
             action(*args)
 
@@ -3842,7 +3800,7 @@ class SpecBuilder:
         roots = [spec.root for spec in self._specs.values()]
         roots = dict((id(r), r) for r in roots)
         for root in roots.values():
-            _inject_patches_variant(root)
+            spack.spec._inject_patches_variant(root)
 
         # Add external paths to specs with just external modules
         for s in self._specs.values():
@@ -3957,79 +3915,6 @@ def _specs_with_commits(spec):
     assert vn.is_git_commit_sha(spec.variants["commit"].value), invalid_commit_msg
 
 
-def _inject_patches_variant(root: spack.spec.Spec) -> None:
-    # This dictionary will store object IDs rather than Specs as keys
-    # since the Spec __hash__ will change as patches are added to them
-    spec_to_patches: Dict[int, Set[spack.patch.Patch]] = {}
-    for s in root.traverse():
-        # After concretizing, assign namespaces to anything left.
-        # Note that this doesn't count as a "change".  The repository
-        # configuration is constant throughout a spack run, and
-        # normalize and concretize evaluate Packages using Repo.get(),
-        # which respects precedence.  So, a namespace assignment isn't
-        # changing how a package name would have been interpreted and
-        # we can do it as late as possible to allow as much
-        # compatibility across repositories as possible.
-        if s.namespace is None:
-            s.namespace = spack.repo.PATH.repo_for_pkg(s.name).namespace
-
-        if s.concrete:
-            continue
-
-        # Add any patches from the package to the spec.
-        node_patches = {
-            patch
-            for cond, patch_list in spack.repo.PATH.get_pkg_class(s.fullname).patches.items()
-            if s.satisfies(cond)
-            for patch in patch_list
-        }
-        if node_patches:
-            spec_to_patches[id(s)] = node_patches
-
-    # Also record all patches required on dependencies by depends_on(..., patch=...)
-    for dspec in root.traverse_edges(deptype=dt.ALL, cover="edges", root=False):
-        if dspec.spec.concrete:
-            continue
-
-        pkg_deps = spack.repo.PATH.get_pkg_class(dspec.parent.fullname).dependencies
-
-        edge_patches: List[spack.patch.Patch] = []
-        for cond, deps_by_name in pkg_deps.items():
-            dependency = deps_by_name.get(dspec.spec.name)
-            if not dependency:
-                continue
-
-            if not dspec.parent.satisfies(cond):
-                continue
-
-            for pcond, patch_list in dependency.patches.items():
-                if dspec.spec.satisfies(pcond):
-                    edge_patches.extend(patch_list)
-
-        if edge_patches:
-            spec_to_patches.setdefault(id(dspec.spec), set()).update(edge_patches)
-
-    for spec in root.traverse():
-        if id(spec) not in spec_to_patches:
-            continue
-
-        patches = list(spec_to_patches[id(spec)])
-        variant: vt.VariantValue = spec.variants.setdefault(
-            "patches", vt.MultiValuedVariant("patches", ())
-        )
-        variant.set(*(p.sha256 for p in patches))
-        # FIXME: Monkey patches variant to store patches order
-        ordered_hashes = [(*p.ordering_key, p.sha256) for p in patches if p.ordering_key]
-        ordered_hashes.sort()
-        tty.debug(
-            f"Ordered hashes [{spec.name}]: "
-            + ", ".join("/".join(str(e) for e in t) for t in ordered_hashes)
-        )
-        setattr(
-            variant, "_patches_in_order_of_appearance", [sha256 for _, _, sha256 in ordered_hashes]
-        )
-
-
 def _ensure_external_path_if_external(spec: spack.spec.Spec) -> None:
     if not spec.external_modules or spec.external_path:
         return
@@ -4096,7 +3981,7 @@ class Solver:
                     deps = {
                         edge.spec.name
                         for edge in s.edges_to_dependencies()
-                        if edge.direct and edge.when == spack.spec.Spec()
+                        if edge.direct and edge.when == EMPTY_SPEC
                     }
                     if deps:
                         graph = analyzer.possible_dependencies(

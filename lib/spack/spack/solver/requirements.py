@@ -209,7 +209,7 @@ class RequirementParser:
         return spec, condition, message
 
     def _raw_yaml_data(self, pkg_name: str, *, section: str, virtual: bool = False):
-        config = self.config.get("packages")
+        config = self.config.get_config("packages")
         data = config.get(pkg_name, {}).get(section, [])
         kind = RequirementKind.PACKAGE
 
@@ -301,8 +301,7 @@ class RequirementParser:
         except spack.error.SpackError as e:
             tty.debug(
                 f"[{__name__}] Rejecting the default '{constraint}' requirement "
-                f"on '{pkg_name}': {str(e)}",
-                level=2,
+                f"on '{pkg_name}': {str(e)}"
             )
             return True
         return False
