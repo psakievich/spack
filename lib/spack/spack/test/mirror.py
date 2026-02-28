@@ -500,13 +500,13 @@ def test_filter_specs(include, exclude, gold):
     m = spack.mirrors.mirror.Mirror(data)
     filter = MirrorSpecFilter(m)
 
-    filtered, filtrate = filter(input_specs)
+    included, excluded = filter(input_specs)
 
-    assert filtered is not None
-    assert filtrate is not None
+    assert included is not None
+    assert excluded is not None
 
     # lossless
-    assert (set(filtered) | set(filtrate)) == set(input_specs)
+    assert (set(included) | set(excluded)) == set(input_specs)
 
     for i in gold:
-        assert input_specs[i] in filtered
+        assert input_specs[i] in included

@@ -124,6 +124,7 @@ def setup_parser(subparser: argparse.ArgumentParser):
         help="for a private mirror, include non-redistributable packages",
     )
     arguments.add_common_arguments(push, ["specs", "jobs"])
+    arguments.add_filter_args(push)
     push.set_defaults(func=push_fn)
 
     install = subparsers.add_parser("install", help=install_fn.__doc__)
@@ -381,6 +382,25 @@ def _specs_to_be_packaged(
     return specs
 
 
+def _apply_buildcache_filter_args(mirror, args):
+    """Apply per-command include/exclude filter args to a mirror object (not saved to config)."""
+    if args.exclude_file:
+        with open(args.exclude_file, "r", encoding="utf-8") as f:
+            specs = [s.strip() for s in f if s.strip()]
+        mirror.update({"exclude": specs})
+    elif args.exclude_specs:
+        parsed = spack.cmd.parse_specs(str(args.exclude_specs).split())
+        mirror.update({"exclude": [str(s) for s in parsed]})
+
+    if args.include_file:
+        with open(args.include_file, "r", encoding="utf-8") as f:
+            specs = [s.strip() for s in f if s.strip()]
+        mirror.update({"include": specs})
+    elif args.include_specs:
+        parsed = spack.cmd.parse_specs(str(args.include_specs).split())
+        mirror.update({"include": [str(s) for s in parsed]})
+
+
 def push_fn(args):
     """create a binary package and push it to a mirror"""
     if args.specs:
@@ -390,6 +410,9 @@ def push_fn(args):
 
     mirror = args.mirror
     assert isinstance(mirror, spack.mirrors.mirror.Mirror)
+
+    # Apply per-command filter args to the mirror (not saved to config)
+    _apply_buildcache_filter_args(mirror, args)
 
     push_url = mirror.push_url
 
@@ -460,15 +483,15 @@ def push_fn(args):
             tty.info("All specs are already in the buildcache. Use --force to overwrite them.")
         else:
             tty.info(
-                f"The following {len(skipped)} specs were skipped as they already exist in the"
-                " buildcache:\n"
+                f"The following {plural(len(skipped), 'spec')} were skipped as they already"
+                " exist in the buildcache:\n"
                 f"    {', '.join(elide_list([_format_spec(s) for s in skipped], 5))}\n"
                 "    Use --force to overwrite them."
             )
 
     if excluded:
         tty.info(
-            f"The following {len(excluded)} specs were ommitted due from pushing to the"
+            f"The following {plural(len(excluded), 'spec')} were omitted from pushing to the"
             " buildcache due to filters:\n"
             f"    {', '.join(elide_list([_format_spec(s) for s in excluded], 5))}\n"
         )
