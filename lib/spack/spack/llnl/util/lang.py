@@ -30,6 +30,8 @@ from typing import (
     Union,
 )
 
+from ..string import plural  # noqa: F401 - re-exported for use alongside elide_list
+
 # Ignore emacs backups when listing modules
 ignore_modules = r"^\.#|~$"
 
