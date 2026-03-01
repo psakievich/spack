@@ -112,42 +112,33 @@ class Mirror:
     def _get_spec_filters(self, key: str) -> List[str]:
         if isinstance(self._data, str):
             return []
-        filter_source = self._data.get(key, [])
+        filter_source = self._data.get(key, {})
 
-        # Legacy: single string treated as a file path
-        if isinstance(filter_source, str):
-            return self._read_filter_file(filter_source)
+        if not isinstance(filter_source, dict):
+            return []
 
-        # Legacy: plain list of spec strings
-        if isinstance(filter_source, list):
-            return filter_source
+        result: List[str] = []
+        seen: set = set()
 
-        # New structured format: {"specs": [...], "files": [...]}
-        if isinstance(filter_source, dict):
-            result: List[str] = []
-            seen: set = set()
+        # Files have lower precedence — add them first
+        files = filter_source.get("files", [])
+        if isinstance(files, str):
+            files = [files]
+        for filepath in files:
+            for spec_str in self._read_filter_file(filepath):
+                if spec_str not in seen:
+                    result.append(spec_str)
+                    seen.add(spec_str)
 
-            # Files have lower precedence — add them first
-            files = filter_source.get("files", [])
-            if isinstance(files, str):
-                files = [files]
-            for filepath in files:
-                for spec_str in self._read_filter_file(filepath):
-                    if spec_str not in seen:
-                        result.append(spec_str)
-                        seen.add(spec_str)
+        # Inline specs have higher precedence — if already present from a
+        # file, move the entry to the end so the inline version wins.
+        for spec_str in filter_source.get("specs", []):
+            if spec_str in seen:
+                result.remove(spec_str)
+            result.append(spec_str)
+            seen.add(spec_str)
 
-            # Inline specs have higher precedence — if already present from a
-            # file, move the entry to the end so the inline version wins.
-            for spec_str in filter_source.get("specs", []):
-                if spec_str in seen:
-                    result.remove(spec_str)
-                result.append(spec_str)
-                seen.add(spec_str)
-
-            return result
-
-        return []
+        return result
 
     @property
     def name(self):

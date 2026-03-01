@@ -78,42 +78,30 @@ mirror_entry = {
         "push": fetch_and_push,
         "autopush": {"type": "boolean"},
         "exclude": {
-            "anyOf": [
-                {"type": "array", "items": {"type": "string"}},
-                {"type": "string"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "specs": {"type": "array", "items": {"type": "string"}},
-                        "files": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}},
-                            ]
-                        },
-                    },
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "specs": {"type": "array", "items": {"type": "string"}},
+                "files": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ]
                 },
-            ]
+            },
         },
         "include": {
-            "anyOf": [
-                {"type": "array", "items": {"type": "string"}},
-                {"type": "string"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "specs": {"type": "array", "items": {"type": "string"}},
-                        "files": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}},
-                            ]
-                        },
-                    },
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "specs": {"type": "array", "items": {"type": "string"}},
+                "files": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ]
                 },
-            ]
+            },
         },
         **connection,  # type: ignore
     },
