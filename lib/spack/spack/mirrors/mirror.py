@@ -99,7 +99,12 @@ class Mirror:
 
     def _read_filter_file(self, path: str) -> List[str]:
         """Read spec strings from a filter file, one per line. Blank lines are skipped.
-        Emits a warning and returns an empty list if the file does not exist."""
+        Emits a warning and returns an empty list if the file does not exist.
+
+        Note: differs from ``specs_from_text_file`` in ``cmd/mirror.py``, which
+        returns parsed ``Spec`` objects rather than raw strings and raises on a
+        missing file.  Filter assembly requires raw strings, and a missing file
+        should warn rather than abort, so that function cannot be reused here."""
         if not os.path.isfile(path):
             tty.warn(
                 f"{path} is not a valid file for mirror filter. "
