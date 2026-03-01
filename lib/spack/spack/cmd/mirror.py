@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
 import argparse
+import os
 import sys
 
 import spack.caches
@@ -302,27 +303,32 @@ def _configure_access_pair(
 
 
 def _parse_mirror_filters(mirror, args) -> bool:
-    include_specs = []
-    if args.include_file:
-        include_specs.extend(specs_from_text_file(args.include_file, concretize=False))
-        mirror.update({"include": args.include_file})
-    if args.include_specs:
-        include_specs.extend(spack.cmd.parse_specs(str(args.include_specs).split()))
-        # round trip specs to assure they are valid
-        mirror.update({"include": [str(s) for s in include_specs]})
+    changed = False
+    for key in ("include", "exclude"):
+        file_arg = f"{key}_file"
+        specs_arg = f"{key}_specs"
+        filter_dict = {}
 
-    exclude_specs = []
-    if args.exclude_file:
-        exclude_specs.extend(specs_from_text_file(args.exclude_file, concretize=False))
-        mirror.update({"exclude": args.exclude_file})
-    if args.exclude_specs:
-        exclude_specs.extend(spack.cmd.parse_specs(str(args.exclude_specs).split()))
-        # round trip specs to assure they are valid
-        mirror.update({"exclude": [str(s) for s in exclude_specs]})
-    if include_specs or exclude_specs:
-        return True
-    else:
-        return False
+        if getattr(args, file_arg, None):
+            path = getattr(args, file_arg)
+            if not os.path.isfile(path):
+                raise SpackError(
+                    f"{path} is not a valid file for --{key.replace('_', '-')}-file. "
+                    "Please ensure the file exists."
+                )
+            # Validate that specs in the file parse cleanly
+            specs_from_text_file(path, concretize=False)
+            filter_dict["files"] = [path]
+
+        if getattr(args, specs_arg, None):
+            parsed = spack.cmd.parse_specs(str(getattr(args, specs_arg)).split())
+            filter_dict["specs"] = [str(s) for s in parsed]
+
+        if filter_dict:
+            mirror.update({key: filter_dict})
+            changed = True
+
+    return changed
 
 
 def mirror_add(args):

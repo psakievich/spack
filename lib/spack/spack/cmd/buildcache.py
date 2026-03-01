@@ -383,21 +383,20 @@ def _specs_to_be_packaged(
 
 def _apply_buildcache_filter_args(mirror, args):
     """Apply per-command include/exclude filter args to a mirror object (not saved to config)."""
-    if args.exclude_file:
-        with open(args.exclude_file, "r", encoding="utf-8") as f:
-            specs = [s.strip() for s in f if s.strip()]
-        mirror.update({"exclude": specs})
-    elif args.exclude_specs:
-        parsed = spack.cmd.parse_specs(str(args.exclude_specs).split())
-        mirror.update({"exclude": [str(s) for s in parsed]})
+    for key in ("exclude", "include"):
+        file_arg = f"{key}_file"
+        specs_arg = f"{key}_specs"
+        filter_dict = {}
 
-    if args.include_file:
-        with open(args.include_file, "r", encoding="utf-8") as f:
-            specs = [s.strip() for s in f if s.strip()]
-        mirror.update({"include": specs})
-    elif args.include_specs:
-        parsed = spack.cmd.parse_specs(str(args.include_specs).split())
-        mirror.update({"include": [str(s) for s in parsed]})
+        if getattr(args, file_arg, None):
+            filter_dict["files"] = [getattr(args, file_arg)]
+
+        if getattr(args, specs_arg, None):
+            parsed = spack.cmd.parse_specs(str(getattr(args, specs_arg)).split())
+            filter_dict["specs"] = [str(s) for s in parsed]
+
+        if filter_dict:
+            mirror.update({key: filter_dict})
 
 
 def push_fn(args):

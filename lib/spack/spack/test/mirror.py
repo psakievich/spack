@@ -471,14 +471,12 @@ dev_path=*
         "exclude": str(exclude_file),
         "include": "include.txt",
     }
-    # TODO figure out why SystemExit doesn't raise until the first assertion
-    # object creation should be where the exception get's raised
     m = spack.mirrors.mirror.Mirror(mirror_raw)
-    with pytest.raises(SystemExit):
-        assert not m.inclusions
+    # A missing file emits a warning and returns an empty list (does not raise)
+    assert m.inclusions == []
     assert "dev_path=*" in m.exclusions
     _, err = capfd.readouterr()
-    # should have a message to users to indicate the file does not exist
+    # should have a message to users indicating the file does not exist
     assert "include.txt" in err
 
 
@@ -508,5 +506,134 @@ def test_filter_specs(include, exclude, gold):
     # lossless
     assert (set(included) | set(excluded)) == set(input_specs)
 
+    for i in gold:
+        assert input_specs[i] in included
+
+
+# ---------------------------------------------------------------------------
+# Tests for the structured {"specs": [...], "files": [...]} filter format
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_structured_filter_specs_only():
+    """Structured format with only inline specs works like a plain list."""
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {"specs": ["dev_path=*", "+shared"]},
+        "include": {"specs": ["+foo"]},
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    assert "dev_path=*" in m.exclusions
+    assert "+shared" in m.exclusions
+    assert "+foo" in m.inclusions
+
+
+def test_mirror_structured_filter_files_only(tmp_path: pathlib.Path):
+    """Structured format with only file entries reads specs from the file."""
+    filter_file = tmp_path / "exclude.txt"
+    filter_file.write_text("dev_path=*\n+shared\n")
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {"files": [str(filter_file)]},
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    assert "dev_path=*" in m.exclusions
+    assert "+shared" in m.exclusions
+
+
+def test_mirror_structured_filter_multiple_files(tmp_path: pathlib.Path):
+    """Multiple files are merged into a single deduplicated list."""
+    file1 = tmp_path / "file1.txt"
+    file1.write_text("pkg-a\npkg-b\n")
+    file2 = tmp_path / "file2.txt"
+    file2.write_text("pkg-c\n")
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {"files": [str(file1), str(file2)]},
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    assert set(m.exclusions) == {"pkg-a", "pkg-b", "pkg-c"}
+
+
+def test_mirror_structured_filter_files_as_string(tmp_path: pathlib.Path):
+    """A single file path given as a string (not list) is also accepted."""
+    filter_file = tmp_path / "exclude.txt"
+    filter_file.write_text("dev_path=*\n")
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {"files": str(filter_file)},
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    assert "dev_path=*" in m.exclusions
+
+
+def test_mirror_structured_filter_missing_file_warns(capfd, tmp_path: pathlib.Path):
+    """A missing file in the structured format emits a warning and returns an empty list."""
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {"files": [str(tmp_path / "nonexistent.txt")]},
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    # Should not raise; missing file produces an empty list with a warning
+    assert m.exclusions == []
+    _, err = capfd.readouterr()
+    assert "nonexistent.txt" in err
+
+
+def test_mirror_structured_filter_specs_override_files(tmp_path: pathlib.Path):
+    """Inline specs have higher precedence than file entries.
+
+    A spec that appears in both a file and the inline specs list should
+    appear only once in the assembled result, in the inline (later) position.
+    """
+    filter_file = tmp_path / "exclude.txt"
+    filter_file.write_text("dev_path=*\n+shared\n")
+    mirror_raw = {
+        "url": "https://example.com",
+        "exclude": {
+            "specs": ["+shared", "+bar"],  # +shared also in file
+            "files": [str(filter_file)],
+        },
+    }
+    m = spack.mirrors.mirror.Mirror(mirror_raw)
+    exclusions = m.exclusions
+    # All three unique specs present
+    assert set(exclusions) == {"dev_path=*", "+shared", "+bar"}
+    # +shared appears only once (no duplicate)
+    assert exclusions.count("+shared") == 1
+    # Inline specs (+shared, +bar) appear after file specs (dev_path=*)
+    assert exclusions.index("+shared") > exclusions.index("dev_path=*")
+    assert exclusions.index("+bar") > exclusions.index("dev_path=*")
+
+
+@pytest.mark.parametrize(
+    "include,exclude,gold",
+    [
+        # Structured exclude with inline specs only
+        ([], {"specs": ["dev_path=*", "@main"]}, [2]),
+        # Structured exclude via file (gold index 2 = foo@2.1.3 is kept)
+        ([], "FILE:dev_path=*,@main", [2]),
+        # Structured include overrides exclude
+        ({"specs": ["dev_path=*"]}, {"specs": ["@main"]}, [1, 2]),
+    ],
+)
+def test_filter_specs_structured(include, exclude, gold, tmp_path: pathlib.Path):
+    """MirrorSpecFilter works correctly with the new structured filter format."""
+    input_specs = [spack.spec.Spec(s) for s in INPUT_SPEC_STRS]
+
+    # Allow the parametrize to specify file-based excludes via a sentinel
+    if isinstance(exclude, str) and exclude.startswith("FILE:"):
+        spec_strs = exclude[5:].split(",")
+        filter_file = tmp_path / "exclude.txt"
+        filter_file.write_text("\n".join(spec_strs) + "\n")
+        exclude = {"files": [str(filter_file)]}
+
+    data = {"include": include, "exclude": exclude}
+    m = spack.mirrors.mirror.Mirror(data)
+    f = MirrorSpecFilter(m)
+
+    included, excluded = f(input_specs)
+
+    assert (set(included) | set(excluded)) == set(input_specs)
     for i in gold:
         assert input_specs[i] in included
