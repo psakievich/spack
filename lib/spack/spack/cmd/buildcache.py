@@ -28,7 +28,7 @@ from spack import traverse
 from spack.cmd import display_specs
 from spack.cmd.common import arguments
 from spack.llnl.util.lang import elide_list, stable_partition
-from spack.llnl.util.string import plural
+from spack.llnl.string import plural
 from spack.spec import Spec, save_dependency_specfiles
 
 from ..buildcache_migrate import migrate
