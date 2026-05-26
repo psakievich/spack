@@ -218,6 +218,17 @@ class NoChecksumException(SpackError):
         )
 
 
+class GitCommitMatchExcpetion(SpackError):
+    """
+    Raised if a git repository fails to match git commit
+    """
+    def __init__(self, path, expected, computed):
+        super().__init__(
+            f"Git commit match failed for {path}",
+            f"Expected {expected} but got {computed}. "
+        )
+
+
 class CompilerError(SpackError):
     """Raised if something goes wrong when probing or querying a compiler."""
 

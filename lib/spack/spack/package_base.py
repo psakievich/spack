@@ -1604,7 +1604,6 @@ class PackageBase(WindowsRPath, PackageViewMixin, metaclass=PackageMeta):
         if (
             checksum
             and (self.version not in self.versions)
-            and (not isinstance(self.version, GitVersion))
             and ("dev_path" not in self.spec.variants)
         ):
             tty.warn(

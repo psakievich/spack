@@ -15,6 +15,7 @@ import spack.llnl.util.filesystem as fs
 import spack.llnl.util.lang
 import spack.util.executable as exe
 from spack.util.environment import EnvironmentModifications
+from spack.error import GitCommitMatchExcpetion
 
 # regex for a commit version
 COMMIT_VERSION = re.compile(r"^[a-f0-9]{40}$")
@@ -428,3 +429,11 @@ def git_clone(
     _exec_git_commands(git_exe, [clone], debug)
     if old:
         _exec_git_commands(git_exe, [fetch], debug, dest)
+
+
+def git_verify_state(dir, commit, ref='HEAD', git_exe=None):
+    """Verify git ref is on the specified commit (default HEAD)"""
+    git_exe = git_exe or git(required=True)
+    check = git_exe("-C", dir, "rev-parse", ref)
+    if check != commit:
+        raise GitCommitMatchExcpetion(dir, commit, check)

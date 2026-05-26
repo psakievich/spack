@@ -842,7 +842,6 @@ class GitFetchStrategy(VCSFetchStrategy):
     ]
 
     def __init__(self, **kwargs):
-
         self.commit: Optional[str] = None
         self.tag: Optional[str] = None
         self.branch: Optional[str] = None
@@ -1043,6 +1042,22 @@ class GitFetchStrategy(VCSFetchStrategy):
 
             self.git(*co_args)
             self.git(*clean_args)
+
+    @_needs_stage
+    def check(self):
+        if not self.commit or False:
+            raise spack.error.FetchError(
+                f"{self.__class__.__name__} requires a known commit sha to verify the stage."
+            )
+        if self.commit:
+            spack.util.git.git_verify_state(
+                self.stage.source_path, self.commit, git_exe=self.git_exe
+            )
+            # only check tags for now, branches might be too chaotic
+            if self.tag:
+                spack.util.git.git_verify_state(
+                    self.stage.source_path, self.commit, ref=self.tag, git_exe=self.git_exe
+                )
 
     def __str__(self):
         return f"[git] {self._repo_info()}"
