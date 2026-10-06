@@ -1461,3 +1461,17 @@ Options for ``deptype`` include:
 
 * Any combination of ``build``, ``link``, ``run``, and ``test`` separated by commas.
 * ``all`` for all types of dependencies.
+
+Large graphs are often easier to read when they are cut down to the neighborhood of the package you care about.
+The ``-A``, ``-B``, and ``-C`` flags do that, and they work like the context flags of ``grep``: the specs matching the command line are the "hits", and the graph is pruned to those plus a number of levels of context around them.
+``-A`` follows dependencies, like the lines ``grep`` prints *after* a hit, ``-B`` follows dependents, and ``-C`` is shorthand for both.
+A level of ``0`` means "follow that direction all the way to the terminal nodes", so the default output is the same as ``-A 0``.
+
+.. code-block:: console
+
+   $ spack graph -A 1 hdf5         # hdf5 and its direct dependencies
+   $ spack graph -A 2 hdf5         # two levels of dependencies
+   $ spack graph -B 1 zlib-ng      # zlib-ng and whatever depends on it directly
+   $ spack graph -C 1 zlib-ng      # one level in both directions
+
+Dependents only exist relative to a set of specs to look them up in, so ``-B`` is most useful with ``--installed``, which searches the whole database, or inside an environment, where the whole lockfile is searched.

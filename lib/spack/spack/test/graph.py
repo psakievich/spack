@@ -113,3 +113,41 @@ o | | | | mpich
 o gcc
 """
     )
+
+
+def test_select_with_context(config, mock_packages):
+    """Test selecting a subgraph of mpileaks around a node, with context in both directions"""
+    s = spack.concretize.concretize_one("mpileaks")
+
+    def hashes(*names):
+        return {s[name].dag_hash() for name in names}
+
+    # Without any level, only the matches themselves are selected
+    roots, selection = spack.graph.select_with_context([s["libdwarf"]], [s])
+    assert selection == hashes("libdwarf")
+    assert [x.name for x in roots] == ["libdwarf"]
+
+    # One level of dependents: dyninst is the only package depending on libdwarf, and since
+    # callpath is not selected, dyninst is the root of the subgraph
+    roots, selection = spack.graph.select_with_context([s["libdwarf"]], [s], dependent_levels=1)
+    assert selection == hashes("libdwarf", "dyninst")
+    assert [x.name for x in roots] == ["dyninst"]
+
+    # One level in both directions
+    roots, selection = spack.graph.select_with_context(
+        [s["libdwarf"]], [s], dependent_levels=1, dependency_levels=1
+    )
+    assert selection == hashes(
+        "libdwarf", "dyninst", "libelf", "gcc", "gcc-runtime", "compiler-wrapper"
+    )
+    assert [x.name for x in roots] == ["dyninst"]
+
+    # Zero levels means "follow that direction all the way to the terminal nodes"
+    roots, selection = spack.graph.select_with_context([s["libelf"]], [s], dependent_levels=0)
+    assert selection == hashes("libelf", "libdwarf", "dyninst", "callpath", "mpileaks")
+    assert [x.name for x in roots] == ["mpileaks"]
+
+    # Matches that are not part of the universe of specs are ignored
+    other = spack.concretize.concretize_one("dt-diamond")
+    roots, selection = spack.graph.select_with_context([other], [s], dependency_levels=0)
+    assert not selection and not roots

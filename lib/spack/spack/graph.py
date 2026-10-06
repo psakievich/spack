@@ -40,7 +40,7 @@ kind of like the graph git shows with ``git log --graph``, e.g.
 
 import enum
 import sys
-from typing import List, Optional, Set, TextIO, Tuple
+from typing import Dict, Iterable, List, Optional, Set, TextIO, Tuple
 
 import spack.context
 import spack.deptypes as dt
@@ -84,6 +84,9 @@ class AsciiGraph:
         self.indent = 0
         self.depflag = dt.ALL
 
+        #: If not None, dag hashes of the only nodes that should be graphed
+        self.selection: Optional[Set[str]] = None
+
         # These are colors in the order they'll be used for edges.
         # See spack.util.tty.color for details on color characters.
         self.colors = "rgbmcyRGBMCY"
@@ -98,6 +101,10 @@ class AsciiGraph:
 
     def _indent(self):
         self._out.write(self.indent * " ")
+
+    def _selected(self, node: spack.spec.Spec) -> bool:
+        """Whether a node is part of the subgraph being graphed"""
+        return self.selection is None or node.dag_hash() in self.selection
 
     def _write_edge(self, string, index, sub=0):
         """Write a colored edge to the output stream."""
@@ -323,7 +330,11 @@ class AsciiGraph:
         self._out = spack.util.tty.color.ColorStream(out, color=color)
 
         # We'll traverse the spec in topological order as we graph it.
-        nodes_in_topological_order = list(spec.traverse(order="topo", deptype=self.depflag))
+        nodes_in_topological_order = [
+            node
+            for node in spec.traverse(order="topo", deptype=self.depflag)
+            if self._selected(node)
+        ]
         nodes_in_topological_order.reverse()
 
         # Work on a copy to be nondestructive
@@ -419,7 +430,14 @@ class AsciiGraph:
 
                 # Replace node with its dependencies
                 self._frontier.pop(i)
-                edges = sorted(node.edges_to_dependencies(depflag=self.depflag), reverse=True)
+                edges = sorted(
+                    (
+                        edge
+                        for edge in node.edges_to_dependencies(depflag=self.depflag)
+                        if self._selected(edge.spec)
+                    ),
+                    reverse=True,
+                )
                 if edges:
                     deps = [e.spec.dag_hash() for e in edges]
                     self._connect_deps(i, deps, "new-deps")  # anywhere.
@@ -429,13 +447,34 @@ class AsciiGraph:
 
 
 def graph_ascii(
-    spec, node="o", out=None, debug=False, indent=0, color=None, depflag: dt.DepFlag = dt.ALL
+    spec,
+    node="o",
+    out=None,
+    debug=False,
+    indent=0,
+    color=None,
+    depflag: dt.DepFlag = dt.ALL,
+    selection: Optional[Set[str]] = None,
 ):
+    """Write an ascii graph of a spec to ``out``.
+
+    Args:
+        spec: root of the graph to be drawn
+        node: character used to represent a node
+        out: optional output stream. If None sys.stdout is used
+        debug: print internal state of the graph next to each line
+        indent: number of spaces to indent the graph by
+        color: whether to write in color. Default is to autodetect
+        depflag: dependency types to consider
+        selection: if not None, dag hashes of the only nodes to be drawn. Nodes outside of
+            this set, and the edges pointing to them, are pruned from the graph
+    """
     graph = AsciiGraph()
     graph.debug = debug
     graph.indent = indent
     graph.node_character = node
     graph.depflag = depflag
+    graph.selection = selection
 
     graph.write(spec, color=color, out=out)
 
@@ -576,6 +615,7 @@ def graph_dot(
     builder: Optional[DotGraphBuilder] = None,
     depflag: dt.DepFlag = dt.ALL,
     out: Optional[TextIO] = None,
+    selection: Optional[Set[str]] = None,
 ):
     """DOT graph of the concrete specs passed as input.
 
@@ -584,6 +624,8 @@ def graph_dot(
         builder: builder to use to render the graph
         depflag: dependency types to consider
         out: optional output stream. If None sys.stdout is used
+        selection: if not None, dag hashes of the only nodes to be represented. Nodes outside
+            of this set, and the edges incident to them, are pruned from the graph
     """
     if not specs:
         raise ValueError("Must provide specs to graph_dot")
@@ -595,6 +637,112 @@ def graph_dot(
     for edge in spack.traverse.traverse_edges(
         specs, cover="edges", order="breadth", deptype=depflag
     ):
+        if selection is not None and not _edge_in_selection(edge, selection):
+            continue
         builder.visit(edge)
 
     out.write(builder.render())
+
+
+def _edge_in_selection(edge: spack.spec.DependencySpec, selection: Set[str]) -> bool:
+    """Whether both ends of an edge are part of a selected subgraph.
+
+    The synthetic edges yielded for root nodes have no parent, so only their child counts.
+    """
+    if edge.parent is not None and edge.parent.dag_hash() not in selection:
+        return False
+    return edge.spec.dag_hash() in selection
+
+
+def _adjacency(
+    specs: Iterable[spack.spec.Spec], depflag: dt.DepFlag
+) -> Tuple[Dict[str, spack.spec.Spec], Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Return the nodes of the DAGs rooted at ``specs``, and their edges in both directions.
+
+    Args:
+        specs: roots of the DAGs to be analyzed
+        depflag: dependency types to consider
+
+    Returns:
+        A tuple of three dicts, all keyed by dag hash: the nodes themselves, the dag hashes
+        of the dependencies of each node, and the dag hashes of its dependents.
+    """
+    nodes: Dict[str, spack.spec.Spec] = {}
+    for node in spack.traverse.traverse_nodes(
+        specs, deptype=depflag, key=spack.traverse.by_dag_hash
+    ):
+        nodes.setdefault(node.dag_hash(), node)
+
+    dependencies: Dict[str, Set[str]] = {h: set() for h in nodes}
+    dependents: Dict[str, Set[str]] = {h: set() for h in nodes}
+    for parent_hash, node in nodes.items():
+        for edge in node.edges_to_dependencies(depflag=depflag):
+            child_hash = edge.spec.dag_hash()
+            # Dependents are only tracked within the given universe of specs
+            if child_hash not in nodes:
+                continue
+            dependencies[parent_hash].add(child_hash)
+            dependents[child_hash].add(parent_hash)
+
+    return nodes, dependencies, dependents
+
+
+def _within_levels(starts: Iterable[str], adjacency: Dict[str, Set[str]], levels: int) -> Set[str]:
+    """Breadth-first search of the nodes at most ``levels`` edges away from ``starts``.
+
+    Args:
+        starts: dag hashes the search starts from, included in the result
+        adjacency: dag hashes of the neighbors of each node, keyed by dag hash
+        levels: maximum number of edges to follow. Zero means follow them until there are
+            no more neighbors i.e. all the way to the terminal nodes
+    """
+    result = set(starts)
+    frontier = list(result)
+    level = 0
+    while frontier and (levels == 0 or level < levels):
+        level += 1
+        next_frontier = []
+        for current in frontier:
+            for neighbor in adjacency.get(current, ()):
+                if neighbor not in result:
+                    result.add(neighbor)
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+    return result
+
+
+def select_with_context(
+    matches: Iterable[spack.spec.Spec],
+    universe: Iterable[spack.spec.Spec],
+    *,
+    dependency_levels: Optional[int] = None,
+    dependent_levels: Optional[int] = None,
+    depflag: dt.DepFlag = dt.ALL,
+) -> Tuple[List[spack.spec.Spec], Set[str]]:
+    """Select the nodes around ``matches``, like the context lines ``grep`` prints around a hit.
+
+    Args:
+        matches: nodes the context is computed around
+        universe: roots of the DAGs the matches and their context are taken from. Dependents
+            are only followed within this set of specs
+        dependency_levels: how many levels of dependencies to follow below each match. Zero
+            follows them all the way to the terminal nodes, None follows none of them
+        dependent_levels: same, for the dependents above each match
+        depflag: dependency types to consider
+
+    Returns:
+        A tuple with the roots of the selected subgraph, i.e. the selected nodes that have no
+        selected dependent, and the dag hashes of all the selected nodes.
+    """
+    nodes, dependencies, dependents = _adjacency(universe, depflag)
+
+    starts = {s.dag_hash() for s in matches if s.dag_hash() in nodes}
+    selection = set(starts)
+    if dependency_levels is not None:
+        selection |= _within_levels(starts, dependencies, dependency_levels)
+    if dependent_levels is not None:
+        selection |= _within_levels(starts, dependents, dependent_levels)
+
+    roots = [nodes[h] for h in selection if not dependents[h] & selection]
+    roots.sort(key=lambda s: (s.name, s.dag_hash()))
+    return roots, selection

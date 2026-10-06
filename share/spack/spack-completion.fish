@@ -2059,7 +2059,7 @@ complete -c spack -n '__fish_spack_using_command gpg sign' -l clearsign -f -a cl
 complete -c spack -n '__fish_spack_using_command gpg sign' -l clearsign -d 'if specified, create a clearsign signature'
 
 # spack graph
-set -g __fish_spack_optspecs_spack_graph h/help a/ascii d/dot s/static c/color i/installed deptype= l/long L/very-long
+set -g __fish_spack_optspecs_spack_graph h/help a/ascii d/dot s/static c/color i/installed A/after-context= B/before-context= C/context= deptype= l/long L/very-long
 complete -c spack -n '__fish_spack_using_command_pos_remainder 0 graph' -f -k -a '(__fish_spack_specs_or_id)'
 complete -c spack -n '__fish_spack_using_command graph' -s h -l help -f -a help
 complete -c spack -n '__fish_spack_using_command graph' -s h -l help -d 'show this help message and exit'
@@ -2073,6 +2073,12 @@ complete -c spack -n '__fish_spack_using_command graph' -s c -l color -f -a colo
 complete -c spack -n '__fish_spack_using_command graph' -s c -l color -d 'use different colors for different dependency types'
 complete -c spack -n '__fish_spack_using_command graph' -s i -l installed -f -a installed
 complete -c spack -n '__fish_spack_using_command graph' -s i -l installed -d 'graph specs from the DB'
+complete -c spack -n '__fish_spack_using_command graph' -s A -l after-context -r -f -a after_context
+complete -c spack -n '__fish_spack_using_command graph' -s A -l after-context -r -d 'graph NUM levels of dependencies below each matched spec (0 for all of them)'
+complete -c spack -n '__fish_spack_using_command graph' -s B -l before-context -r -f -a before_context
+complete -c spack -n '__fish_spack_using_command graph' -s B -l before-context -r -d 'graph NUM levels of dependents above each matched spec (0 for all of them)'
+complete -c spack -n '__fish_spack_using_command graph' -s C -l context -r -f -a context
+complete -c spack -n '__fish_spack_using_command graph' -s C -l context -r -d 'shorthand for ``-A NUM -B NUM``'
 complete -c spack -n '__fish_spack_using_command graph' -l deptype -r -f -a deptype
 complete -c spack -n '__fish_spack_using_command graph' -l deptype -r -d 'comma-separated list of deptypes to traverse (default=build,link,run,test)'
 complete -c spack -n '__fish_spack_using_command graph' -s l -l long -f -a long
